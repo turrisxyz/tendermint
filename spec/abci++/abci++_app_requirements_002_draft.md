@@ -168,85 +168,63 @@ Likewise, `ExtendVote` can also be non-deterministic:
 
 ## Managing the Application state and related topics
 
-
-
-
-
-
-
-
-
-TODO:
-
-Here we cover the following components of ABCI applications:
-
-- [Connection State](#connection-state) - the interplay between ABCI connections and application state
-  and the differences between `CheckTx` and `DeliverTx`.
-- [Transaction Results](#transaction-results) - rules around transaction
-  results and validity
-- [Validator Set Updates](#validator-updates) - how validator sets are
-  changed during `InitChain` and `EndBlock`
-- [Query](#query) - standards for using the `Query` method and proofs about the
-  application state
-- [Crash Recovery](#crash-recovery) - handshake protocol to synchronize
-  Tendermint and the application on startup.
-- [State Sync](#state-sync) - rapid bootstrapping of new nodes by restoring state machine snapshots
-
 ### Connection State
 
 Since Tendermint maintains four concurrent ABCI connections, it is typical
 for an application to maintain a distinct state for each, and for the states to
-be synchronized during `Commit`.
+be synchronized during `FinalizeBlock`.
 
 #### Concurrency
 
-In principle, each of the four ABCI connections operate concurrently with one
+In principle, each of the four ABCI++ connections operates concurrently with one
 another. This means applications need to ensure access to state is
 thread safe. In practice, both the
 [default in-process ABCI client](https://github.com/tendermint/tendermint/blob/v0.34.4/abci/client/local_client.go#L18)
 and the
-[default Go ABCI
+[default Go ABCI++
 server](https://github.com/tendermint/tendermint/blob/v0.34.4/abci/server/socket_server.go#L32)
 use global locks across all connections, so they are not
 concurrent at all. This means if your app is written in Go, and compiled in-process with Tendermint
 using the default `NewLocalClient`, or run out-of-process using the default `SocketServer`,
-ABCI messages from all connections will be linearizable (received one at a
+ABCI++ messages from all connections will be linearizable (received one at a
 time).
 
 The existence of this global mutex means Go application developers can get
-thread safety for application state by routing *all* reads and writes through the ABCI
-system. Thus it may be *unsafe* to expose application state directly to an RPC
-interface, and unless explicit measures are taken, all queries should be routed through the ABCI Query method.
+thread safety for application state by routing *all* reads and writes through ABCI++.
+Thus it may be *unsafe* to expose application state directly to an RPC
+interface, and unless explicit measures are taken, all queries should be
+routed through the ABCI++ Query method.
 
-#### BeginBlock
+#### FinalizeBlock
 
-The BeginBlock request can be used to run some code at the beginning of
-every block. It also allows Tendermint to send the current block hash
-and header to the application, before it sends any of the transactions.
+Application state should only be persisted to disk during `FinalizeBlock`.
 
-The app should remember the latest height and header (ie. from which it
-has run a successful Commit) so that it can tell Tendermint where to
-pick up from when it restarts. See information on the Handshake, below.
-
-#### Commit
-
-Application state should only be persisted to disk during `Commit`.
-
-Before `Commit` is called, Tendermint locks and flushes the mempool so that no new messages will
+Before `FinalizeBlock` is called, Tendermint locks and flushes the mempool so that no new messages will
 be received on the mempool connection. This provides an opportunity to safely update all four connection
 states to the latest committed state at once.
 
-When `Commit` completes, it unlocks the mempool.
+When `FinalizeBlock` completes, it unlocks the mempool.
 
-WARNING: if the ABCI app logic processing the `Commit` message sends a
+WARNING: if the ABCI app logic processing the `FinalizeBlock` message sends a
 `/broadcast_tx_sync` or `/broadcast_tx_commit` and waits for the response
 before proceeding, it will deadlock. Executing those `broadcast_tx` calls
-involves acquiring a lock that is held during the `Commit` call, so it's not
+involves acquiring a lock that is held during the `FinalizeBlock` call, so it's not
 possible. If you make the call to the `broadcast_tx` endpoints concurrently,
 that's no problem, it just can't be part of the sequential logic of the
-`Commit` function.
+`FinalizeBlock` function.
 
 #### Consensus Connection
+
+
+
+
+
+ICI
+(define candidate states)
+
+
+
+
 
 The Consensus Connection should maintain a `DeliverTxState` - the working state
 for block execution. It should be updated by the calls to `BeginBlock`, `DeliverTx`,
