@@ -2,6 +2,7 @@ package coretypes
 
 import (
 	"encoding/json"
+	"strconv"
 	"time"
 
 	"github.com/tendermint/tendermint/internal/jsontypes"
@@ -18,16 +19,16 @@ type RequestUnsubscribe struct {
 }
 
 type RequestBlockchainInfo struct {
-	MinHeight int64 `json:"minHeight,string"`
-	MaxHeight int64 `json:"maxHeigh,string"`
+	MinHeight Int64 `json:"minHeight"`
+	MaxHeight Int64 `json:"maxHeight"`
 }
 
 type RequestGenesisChunked struct {
-	Chunk int64 `json:"chunk,string"`
+	Chunk Int64 `json:"chunk"`
 }
 
 type RequestBlockInfo struct {
-	Height *int64 `json:"height,string"`
+	Height *Int64 `json:"height"`
 }
 
 type RequestBlockByHash struct {
@@ -63,18 +64,18 @@ type RequestBlockSearch struct {
 }
 
 type RequestValidators struct {
-	Height  *int64 `json:"height,string"`
-	Page    *int   `json:"page"`
-	PerPage *int   `json:"per_page"`
+	Height  *Int64 `json:"height"`
+	Page    *Int64 `json:"page"`
+	PerPage *Int64 `json:"per_page"`
 }
 
 type RequestConsensusParams struct {
-	Height *int64 `json:"height,string"`
+	Height *Int64 `json:"height"`
 }
 
 type RequestUnconfirmedTxs struct {
-	Page    *int `json:"page"`
-	PerPage *int `json:"per_page"`
+	Page    *Int64 `json:"page"`
+	PerPage *Int64 `json:"per_page"`
 }
 
 type RequestBroadcastTx struct {
@@ -84,7 +85,7 @@ type RequestBroadcastTx struct {
 type RequestABCIQuery struct {
 	Path   string         `json:"path"`
 	Data   bytes.HexBytes `json:"data"`
-	Height int64          `json:"height,string"`
+	Height Int64          `json:"height"`
 	Prove  bool           `json:"prove"`
 }
 
@@ -141,4 +142,29 @@ type RequestEvents struct {
 // An EventFilter specifies which events are selected by an /events request.
 type EventFilter struct {
 	Query string `json:"query"`
+}
+
+// Int64 is a wrapper for int64 that encodes to JSON as a string and can be
+// decoded from either a string or a number value.
+type Int64 int64
+
+func (z *Int64) UnmarshalJSON(data []byte) error {
+	var s string
+	if len(data) != 0 && data[0] == '"' {
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+	} else {
+		s = string(data)
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return err
+	}
+	*z = Int64(v)
+	return nil
+}
+
+func (z Int64) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.FormatInt(int64(z), 10)), nil
 }
