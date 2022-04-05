@@ -170,69 +170,99 @@ Likewise, `ExtendVote` can also be non-deterministic:
 
 ### Connection State
 
-Since Tendermint maintains four concurrent ABCI connections, it is typical
-for an application to maintain a distinct state for each, and for the states to
-be synchronized during `FinalizeBlock`.
+Since Tendermint maintains four concurrent ABCI++ connections, it is typical
+for an application to maintain a distinct copies of the state for each, and for the states to
+be synchronized during `Commit`.
 
 #### Concurrency
 
 In principle, each of the four ABCI++ connections operates concurrently with one
 another. This means applications need to ensure access to state is
-thread safe. In practice, both the
-[default in-process ABCI client](https://github.com/tendermint/tendermint/blob/v0.34.4/abci/client/local_client.go#L18)
+thread safe. Up to v0.35.x, both the
+[default in-process ABCI client](https://github.com/tendermint/tendermint/blob/v0.35.x/abci/client/local_client.go#L18)
 and the
 [default Go ABCI++
-server](https://github.com/tendermint/tendermint/blob/v0.34.4/abci/server/socket_server.go#L32)
-use global locks across all connections, so they are not
-concurrent at all. This means if your app is written in Go, and compiled in-process with Tendermint
+server](https://github.com/tendermint/tendermint/blob/v0.35.x/abci/server/socket_server.go#L32)
+used to use global locks across all connections, so they were not
+concurrent at all. This meant if your app was written in Go, and compiled in-process with Tendermint
 using the default `NewLocalClient`, or run out-of-process using the default `SocketServer`,
-ABCI++ messages from all connections will be linearizable (received one at a
+ABCI++ messages from all connections were linearizable (received one at a
 time).
-
-The existence of this global mutex means Go application developers can get
-thread safety for application state by routing *all* reads and writes through ABCI++.
-Thus it may be *unsafe* to expose application state directly to an RPC
-interface, and unless explicit measures are taken, all queries should be
-routed through the ABCI++ Query method.
+This is no longer the case starting from v0.36.1: those locks have been removed and now it is thus
+up to the Application to ensure its thread safety.
 
 #### FinalizeBlock
 
-Application state should only be persisted to disk during `FinalizeBlock`.
+When the Consensus algorithm decides on a block locally, Tendermint uses `FinalizeBlock` to send the
+current block's hash, height, transactions, etc., which the Application uses to transition its state.
 
-Before `FinalizeBlock` is called, Tendermint locks and flushes the mempool so that no new messages will
+The Application should remember the latest height from which it
+has run a successful `Commit` so that it can tell Tendermint where to
+pick up from when it restarts. See information on the Handshake, below.
+
+#### Commit
+
+Application state should only be persisted to disk during `Commit`.
+
+Before `Commit` is called, Tendermint locks and flushes the mempool so that no new messages will
 be received on the mempool connection. This provides an opportunity to safely update all four connection
 states to the latest committed state at once.
 
-When `FinalizeBlock` completes, it unlocks the mempool.
+When `Commit` completes, it unlocks the mempool.
 
-WARNING: if the ABCI app logic processing the `FinalizeBlock` message sends a
+WARNING: if the ABCI app logic processing the `Commit` message sends a
 `/broadcast_tx_sync` or `/broadcast_tx_commit` and waits for the response
 before proceeding, it will deadlock. Executing those `broadcast_tx` calls
-involves acquiring a lock that is held during the `FinalizeBlock` call, so it's not
+involves acquiring a lock that is held during the `Commit` call, so it's not
 possible. If you make the call to the `broadcast_tx` endpoints concurrently,
 that's no problem, it just can't be part of the sequential logic of the
-`FinalizeBlock` function.
+`Commit` function.
+
+#### Candidate States
+
+Tendermint calls `PrepareProposal` when it is about to send a proposed block to the network.
+Likewise, Tendermint calls `ProcessProposal` upon reception of a proposed block from the
+network. In both cases, the proposed block's data (last block's commit info, transactions, etc.)
+is disclosed to the Application, in the same conditions as is done in `FinalizeBlock`.
+
+The Application may decide to _immediately_ execute the given block (i.e., upon `PrepareProposal`
+or `ProcessProposal`). There are two main reasons why the Application may want to do this:
+
+* In order to be sure that the block does not contain _any_ invalid transaction, there is usually
+  no way other than fully executing the transactions in the block as though it was the _decided_
+  block.
+* Upon reception of the decided block via `FinalizeBlock`, if that same block was executed
+  upon `PrepareProposal` or `ProcessProposal` and the resulting state was kept in memory, the
+  Application can simply apply that state (faster) to the main state, rather than reexecuting
+  the decided block (slower).
+
+`PrepareProposal`/`ProcessProposal` can be called many times for a given block height. Moreover,
+it is impossible to predict which of the proposed blocks for a height will be included in that
+height's `FinalizeBlock`.
+Therefore, the state resulting from exectuing proposed blocks, denoted _candidate state_, needs
+to be kept in memory as an _alternative_. When `FinalizeBlock` is called, the Application can
+check if the decided block corresponds to one of its candidate states; if so, it will apply it as
+its `ExecuteTxState` (see [Consensus Connection](#consensus-connection) below),
+which will be persisted during the upcoming `Commit` call.
+
+In particularly bad runs (e.g., because of network instability), Consensus might take many rounds.
+In those cases many proposed blocks will be disclosed to the Application for a given height.
+Indeed, by the nature of Consensus, the number of proposed blocks received by the Application for
+a particular height cannot be bound, so Application developers must act with care and use mechanisms
+to bound memory usage. As a general rule, the Application should be ready to discard candidate states
+before `FinalizeBlock`, even if one of them might end up corresponding to the
+decided block and thus have to be reexecuted upon `FinalizeBlock`.
+
+### States and ABCI++ Connections
 
 #### Consensus Connection
 
-
-
-
-
-ICI
-(define candidate states)
-
-
-
-
-
-The Consensus Connection should maintain a `DeliverTxState` - the working state
-for block execution. It should be updated by the calls to `BeginBlock`, `DeliverTx`,
-and `EndBlock` during block execution and committed to disk as the "latest
-committed state" during `Commit`.
-
-Updates made to the `DeliverTxState` by each method call must be readable by each subsequent method -
-ie. the updates are linearizable.
+The Consensus Connection should maintain an `ExecuteTxState` - the working state
+for block execution. It should be updated by the call to `FinalizeBlock`
+during block execution and committed to disk as the "latest
+committed state" during `Commit`. Execution of proposed blocks must not update the
+`ExecuteTxState`, but rather be kept as a separate candidate state until `FinalizeBlock`
+confirms which of the candidate states (if any) can be used to update `ExecuteTxState`.
 
 #### Mempool Connection
 
@@ -242,41 +272,44 @@ not yet been committed. It should be initialized to the latest committed state
 at the end of every `Commit`.
 
 Before calling `Commit`, Tendermint will lock and flush the mempool connection,
-ensuring that all existing CheckTx are responded to and no new ones can begin.
-The `CheckTxState` may be updated concurrently with the `DeliverTxState`, as
+ensuring that all existing `CheckTx` are responded to and no new ones can begin.
+The `CheckTxState` may be updated concurrently with the `ExecuteTxState`, as
 messages may be sent concurrently on the Consensus and Mempool connections.
 
-After `Commit`, while still holding the mempool lock, CheckTx is run again on all transactions that remain in the
-node's local mempool after filtering those included in the block.
-An additional `Type` parameter is made available to the CheckTx function that
+After `Commit`, while still holding the mempool lock, `CheckTx` is run again on all transactions
+that remain in the node's local mempool after filtering those included in the block.
+An additional `Type` parameter is made available to the `CheckTx` function that
 indicates whether an incoming transaction is new (`CheckTxType_New`), or a
 recheck (`CheckTxType_Recheck`).
 
 Finally, after re-checking transactions in the mempool, Tendermint will unlock
-the mempool connection. New transactions are once again able to be processed through CheckTx.
+the mempool connection. New transactions are once again able to be processed through `CheckTx`.
 
-Note that CheckTx is just a weak filter to keep invalid transactions out of the block chain.
-CheckTx doesn't have to check everything that affects transaction validity; the
-expensive things can be skipped.  It's weak because a Byzantine node doesn't
-care about CheckTx; it can propose a block full of invalid transactions if it wants.
+Note that `CheckTx` is just a weak filter to keep invalid transactions out of the blockchain.
+Since the transaction cannot be guaranteed to be checked against the exact same state as it
+will be executed as part of a (potential) decided block, `CheckTx` shouldn't check _everything_
+that affects the transaction's validity, in particular things whose validity may depend on
+transaction ordering. `CheckTx` is weak because a Byzantine node doesn't care about `CheckTx`;
+it can propose a block full of invalid transactions if it wants. The mechanism ABCI++ has
+in place for dealing with such behavior is `ProcessProposal`.
 
 ##### Replay Protection
 
-To prevent old transactions from being replayed, CheckTx must implement
+To prevent old transactions from being replayed, `CheckTx` must implement
 replay protection.
 
 It is possible for old transactions to be sent to the application. So
-it is important CheckTx implements some logic to handle them.
+it is important `CheckTx` implements some logic to handle them.
 
-#### Query Connection
+#### Info/Query Connection
 
-The Info Connection should maintain a `QueryState` for answering queries from the user,
+The Info (or Query) Connection should maintain a `QueryState` for answering queries from the user,
 and for initialization when Tendermint first starts up (both described further
 below).
-It should always contain the latest committed state associated with the
+It should always contain a copy of the latest committed state associated with the
 latest committed block.
 
-`QueryState` should be set to the latest `DeliverTxState` at the end of every `Commit`,
+`QueryState` should be set to the latest `ExecuteTxState` at the end of every `Commit`,
 after the full block has been processed and the state committed to disk.
 Otherwise it should never be modified.
 
@@ -285,8 +318,8 @@ connecting, according to IP address or node ID. For instance,
 returning non-OK ABCI response to either of the following queries will
 cause Tendermint to not connect to the corresponding peer:
 
-- `p2p/filter/addr/<ip addr>`, where `<ip addr>` is an IP address.
-- `p2p/filter/id/<id>`, where `<is>` is the hex-encoded node ID (the hash of
+* `p2p/filter/addr/<ip addr>`, where `<ip addr>` is an IP address.
+* `p2p/filter/id/<id>`, where `<is>` is the hex-encoded node ID (the hash of
   the node's p2p pubkey).
 
 Note: these query formats are subject to change!
@@ -300,10 +333,22 @@ For more information, see [the state sync section of this document](#state-sync)
 
 ### Transaction Results
 
-The `Info` and `Log` fields are non-deterministic values for debugging/convenience purposes
-that are otherwise ignored.
+The `Info` and `Log` fields in [ExecTxResult](./abci%2B%2B_methods_002_draft.md#exectxresult) are
+non-deterministic values for debugging/convenience purposes that are otherwise ignored.
 
-The `Data` field must be strictly deterministic, but can be arbitrary data.
+The `Data` fields must be strictly deterministic, but can be arbitrary data.
+
+
+
+
+
+
+
+ICI
+
+
+
+
 
 #### Gas
 
@@ -324,7 +369,7 @@ amount of gas the sender of a tx is willing to use, and the later is how much it
 used. Applications should enforce that `GasUsed <= GasWanted` - ie. tx execution
 should halt before it can use more resources than it requested.
 
-When `MaxGas > -1`, Tendermint enforces the following rules:
+When `MaxGas > -1`, Tendermint enforces the following rules:q
 
 - `GasWanted <= MaxGas` for all txs in the mempool
 - `(sum of GasWanted in a block) <= MaxGas` when proposing a block
@@ -344,12 +389,12 @@ In the future, we intend to add a `Priority` field to the responses that can be
 used to explicitly prioritize txs in the mempool for inclusion in a block
 proposal. See [#1861](https://github.com/tendermint/tendermint/issues/1861).
 
-#### CheckTx
+#### `CheckTx`
 
 If `Code != 0`, it will be rejected from the mempool and hence
 not broadcasted to other peers and not included in a proposal block.
 
-`Data` contains the result of the CheckTx transaction execution, if any. It is
+`Data` contains the result of the `CheckTx` transaction execution, if any. It is
 semantically meaningless to Tendermint.
 
 `Events` include any events for the execution, though since the transaction has not
@@ -368,7 +413,7 @@ though it is still included in the block.
 
 DeliverTx also returns a [Code, Data, and Log](../../proto/abci/types.proto#L189-L191).
 
-`Data` contains the result of the CheckTx transaction execution, if any. It is
+`Data` contains the result of the `CheckTx` transaction execution, if any. It is
 semantically meaningless to Tendermint.
 
 Both the `Code` and `Data` are included in a structure that is hashed into the
