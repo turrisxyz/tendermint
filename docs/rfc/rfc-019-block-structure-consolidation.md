@@ -66,6 +66,25 @@ message CommitSig {
 }
 ```
 
+```proto
+message BlockID {
+  bytes         hash            = 1;
+
+  PartSetHeader part_set_header = 2; // Q Do we ever use the PartSetHeader from the actual block header to rebuild the block or figure out what to grab?
+}
+```
+
+### What is the goal of this project?
+
+Remove as much as possible from the block so that:
+
+1. ABCI can still receive enough information to function.
+2. Light clients can quickly prove the state of the blockchain. #REWORD
+3. Nodes performing blocksync to catchup can restore state and verify that
+consensus proceeded correctly using only the contents of the block.
+4. Operators and developers can debug problems that arise with the state
+machine using the contents of the block.
+
 ## Discussion
 
 * TODO
